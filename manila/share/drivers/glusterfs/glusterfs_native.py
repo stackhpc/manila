@@ -125,7 +125,7 @@ class GlusterfsNativeShareDriver(driver.ExecuteMixin,
             gluster_actions.append((AUTH_SSL_ALLOW, access_to))
 
         for option, value in (
-            (NFS_EXPORT_VOL, False), (CLIENT_SSL, True), (SERVER_SSL, True)
+            (NFS_EXPORT_VOL, False), (CLIENT_SSL, False), (SERVER_SSL, False)
         ):
             gluster_actions.append((option, value))
 
