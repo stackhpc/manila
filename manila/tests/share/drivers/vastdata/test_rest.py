@@ -101,8 +101,12 @@ class TestSession(unittest.TestCase):
 
     def setUp(self):
         self.session = vast_rest.Session(
-            "host", "username",
-            "password", False, "1.0"
+            "host",
+            "username",
+            "password",
+            "",
+            False,
+            "1.0",
         )
 
     @mock.patch("requests.Session.request")
@@ -190,6 +194,81 @@ class TestSession(unittest.TestCase):
         self.session.__getattr__(attr)(**params)
         mock_request.assert_called_once_with("get", attr, params=params)
 
+    @mock.patch("requests.Session.request")
+    def test_request_with_pagination_envelope(self, mock_request):
+        """Test that paginated responses are unwrapped."""
+        # Mock a paginated response
+        paginated_response = {
+            "count": 2,
+            "results": [
+                {"id": 1, "name": "Item 1"},
+                {"id": 2, "name": "Item 2"},
+            ],
+            "next": None,
+            "previous": None,
+        }
+
+        mock_response = mock.MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"response content"
+        mock_response.json.return_value = paginated_response
+        mock_response.raise_for_status.return_value = None
+        mock_request.return_value = mock_response
+
+        result = self.session.request("GET", "test_method", log_result=False)
+
+        # Result should be a list of Bunch objects (unwrapped from envelope)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], driver_util.Bunch)
+        self.assertEqual(result[0]["id"], 1)
+        self.assertEqual(result[1]["id"], 2)
+
+    @mock.patch("requests.Session.request")
+    def test_request_without_pagination_envelope(self, mock_request):
+        """Test that non-paginated responses work as before."""
+        # Mock a non-paginated response (flat list)
+        non_paginated_response = [
+            {"id": 1, "name": "Item 1"},
+            {"id": 2, "name": "Item 2"},
+        ]
+
+        mock_response = mock.MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"response content"
+        mock_response.json.return_value = non_paginated_response
+        mock_response.raise_for_status.return_value = None
+        mock_request.return_value = mock_response
+
+        result = self.session.request("GET", "test_method", log_result=False)
+
+        # Non-paginated responses should work as before - list of Bunches
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], driver_util.Bunch)
+        self.assertEqual(result[0]["id"], 1)
+        self.assertEqual(result[1]["id"], 2)
+
+    @mock.patch("requests.Session.request")
+    def test_request_with_single_dict(self, mock_request):
+        """Test that single dict responses work correctly."""
+        # Mock a single dict response (not pagination envelope)
+        dict_response = {"id": 1, "name": "Single Item"}
+
+        mock_response = mock.MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"response content"
+        mock_response.json.return_value = dict_response
+        mock_response.raise_for_status.return_value = None
+        mock_request.return_value = mock_response
+
+        result = self.session.request("GET", "test_method", log_result=False)
+
+        # Should return a Bunch with the dict data
+        self.assertIsInstance(result, driver_util.Bunch)
+        self.assertEqual(result["id"], 1)
+        self.assertEqual(result["name"], "Single Item")
+
 
 class TestVastResource(unittest.TestCase):
     def setUp(self):
@@ -217,21 +296,20 @@ class TestVastResource(unittest.TestCase):
 
     def test_delete_when_entry_not_found(self):
         self.vast_resource.one = mock.MagicMock(return_value=None)
-        self.vast_resource.delete("test")
+        self.vast_resource.delete(name="test")
         self.mock_rest.session.delete.assert_not_called()
 
     def test_delete_when_entry_found(self):
-        mock_entry = mock.MagicMock()
-        mock_entry.id = "1"
+        mock_entry = {"id": "1", "name": "test"}
         self.vast_resource.one = mock.MagicMock(return_value=mock_entry)
-        self.vast_resource.delete("test")
+        self.vast_resource.delete(name="test")
         self.mock_rest.session.delete.assert_called_with(
-            f"{self.vast_resource.resource_name}/{mock_entry.id}"
+            f"{self.vast_resource.resource_name}/1"
         )
 
     def test_one_when_no_entries_found(self):
         self.vast_resource.list = mock.MagicMock(return_value=[])
-        result = self.vast_resource.one("test")
+        result = self.vast_resource.one(name="test")
         self.assertIsNone(result)
 
     def test_one_when_multiple_entries_found(self):
@@ -239,13 +317,18 @@ class TestVastResource(unittest.TestCase):
             return_value=[mock.MagicMock(), mock.MagicMock()]
         )
         with self.assertRaises(manila_exception.VastDriverException):
-            self.vast_resource.one("test")
+            self.vast_resource.one(name="test")
 
     def test_one_when_single_entry_found(self):
         mock_entry = mock.MagicMock()
         self.vast_resource.list = mock.MagicMock(return_value=[mock_entry])
-        result = self.vast_resource.one("test")
+        result = self.vast_resource.one(name="test")
         self.assertEqual(result, mock_entry)
+
+    def test_one_not_found_with_fail_if_missing(self):
+        self.vast_resource.list = mock.MagicMock(return_value=[])
+        with self.assertRaises(manila_exception.VastDriverException):
+            self.vast_resource.one(name="test", fail_if_missing=True)
 
     def test_ensure_when_entry_not_found(self):
         self.vast_resource.one = mock.MagicMock(return_value=None)
@@ -259,6 +342,15 @@ class TestVastResource(unittest.TestCase):
         self.vast_resource.one = mock.MagicMock(return_value=mock_entry)
         result = self.vast_resource.ensure("test", size=10)
         self.assertEqual(result, mock_entry)
+
+    def test_get_entry_by_id(self):
+        """Test getting a single entry by id."""
+        entry_id = "123"
+        self.vast_resource.get(entry_id, param1="value1")
+        self.mock_rest.session.get.assert_called_with(
+            f"{self.vast_resource.resource_name}/{entry_id}",
+            params={"param1": "value1"}
+        )
 
 
 class ViewTest(unittest.TestCase):
@@ -274,10 +366,11 @@ class ViewTest(unittest.TestCase):
                 "host",
                 "username",
                 "password",
+                "",
                 True,
                 "1.0"
             )
-            rest_api.views.create("test-view", "/test", 1)
+            rest_api.views.create(name="test-view", path="/test", policy_id=1)
 
         self.assertEqual(("views",), mock_session.call_args.args)
         self.assertDictEqual(
@@ -288,6 +381,44 @@ class ViewTest(unittest.TestCase):
                     "policy_id": 1,
                     "create_dir": True,
                     "protocols": ["NFS"],
+                }
+            },
+            mock_session.call_args.kwargs,
+        )
+
+    @mock.patch(
+        "manila.share.drivers.vastdata.rest.Session.refresh_auth_token",
+        mock.MagicMock()
+    )
+    def test_view_create_with_tenant_id(self):
+        with mock.patch(
+                "manila.share.drivers.vastdata.rest.Session.post"
+        ) as mock_session:
+            rest_api = vast_rest.RestApi(
+                "host",
+                "username",
+                "password",
+                "",
+                True,
+                "1.0"
+            )
+            rest_api.views.create(
+                name="test-view",
+                path="/test",
+                policy_id=1,
+                tenant_id=123,
+            )
+
+        self.assertEqual(("views",), mock_session.call_args.args)
+        self.assertDictEqual(
+            {
+                "data": {
+                    "name": "test-view",
+                    "path": "/test",
+                    "policy_id": 1,
+                    "create_dir": True,
+                    "protocols": ["NFS"],
+                    "tenant_id": 123,
                 }
             },
             mock_session.call_args.kwargs,
@@ -324,6 +455,7 @@ class TestCapacityMetrics(unittest.TestCase):
             "host",
             "username",
             "password",
+            "",
             True,
             "1.0"
         )
@@ -344,7 +476,12 @@ class TestFolders(unittest.TestCase):
     )
     def setUp(self):
         self.rest_api = vast_rest.RestApi(
-            "host", "username", "password", True, "1.0"
+            "host",
+            "username",
+            "password",
+            "",
+            True,
+            "1.0",
         )
 
     @ddt.data(
@@ -446,6 +583,7 @@ class VipPoolTest(unittest.TestCase):
             "host",
             "username",
             "password",
+            "",
             True,
             "1.0"
         )
@@ -497,6 +635,83 @@ class VipPoolTest(unittest.TestCase):
             vips = self.rest_api.vip_pools.vips("test-vip")
         self.assertListEqual(vips, expected)
 
+    def test_one_with_fail_if_missing(self):
+        """Test that one() raises exception when fail_if_missing=True."""
+        with mock.patch(
+            "manila.share.drivers.vastdata.rest.Session.get",
+                return_value=[]
+        ):
+            with self.assertRaises(
+                    manila_exception.VastDriverException
+            ) as exc:
+                self.rest_api.vip_pools.one(
+                    name="nonexistent-pool",
+                    fail_if_missing=True
+                )
+        self.assertIn("No 'vippool' found", str(exc.exception))
+
+    def test_vippool_one_caching(self):
+        """Test that VipPool.one() caches results."""
+        vippool = driver_util.Bunch(
+            name="test-pool",
+            tenant_id=123,
+            ip_ranges=[["1.1.1.1", "1.1.1.2"]]
+        )
+
+        # Clear any existing cache
+        if hasattr(self.rest_api.vip_pools.one, 'cache'):
+            self.rest_api.vip_pools.one.cache.clear()
+
+        with mock.patch(
+            "manila.share.drivers.vastdata.rest.Session.get",
+            return_value=[vippool]
+        ) as mock_get:
+            # First call - should hit the API
+            result1 = self.rest_api.vip_pools.one(name="test-pool")
+            self.assertEqual(result1.name, "test-pool")
+            self.assertEqual(result1.tenant_id, 123)
+            self.assertEqual(mock_get.call_count, 1)
+
+            # Second call with same params - should use cache
+            result2 = self.rest_api.vip_pools.one(name="test-pool")
+            self.assertEqual(result2.name, "test-pool")
+            self.assertEqual(result2.tenant_id, 123)
+            # Call count should still be 1 (cached)
+            self.assertEqual(mock_get.call_count, 1)
+
+            # Call with different params - should hit the API again
+            self.rest_api.vip_pools.one(name="other-pool")
+            self.assertEqual(mock_get.call_count, 2)
+
+    def test_vippool_one_cache_ttl(self):
+        """Test that VipPool.one() cache expires after TTL."""
+
+        vippool1 = driver_util.Bunch(
+            name="test-pool",
+            tenant_id=123
+        )
+        driver_util.Bunch(
+            name="test-pool",
+            tenant_id=456  # Different tenant_id
+        )
+
+        # Clear any existing cache
+        if hasattr(self.rest_api.vip_pools.one, 'cache'):
+            self.rest_api.vip_pools.one.cache.clear()
+
+        with mock.patch(
+            "manila.share.drivers.vastdata.rest.Session.get"
+        ) as mock_get:
+            # First call returns tenant_id 123
+            mock_get.return_value = [vippool1]
+            result1 = self.rest_api.vip_pools.one(name="test-pool")
+            self.assertEqual(result1.tenant_id, 123)
+
+            # Immediate second call should use cache (tenant_id still 123)
+            result2 = self.rest_api.vip_pools.one(name="test-pool")
+            self.assertEqual(result2.tenant_id, 123)
+            self.assertEqual(mock_get.call_count, 1)
+
 
 class TestRestApi(unittest.TestCase):
 
@@ -506,7 +721,26 @@ class TestRestApi(unittest.TestCase):
             mock.MagicMock(sys_version="1.0")
         ]
         rest_api = vast_rest.RestApi(
-            "host", "username", "password", True, "1.0"
+            "host",
+            "username",
+            "password",
+            "",
+            True,
+            "1.0",
         )
         version = rest_api.get_sw_version()
         self.assertEqual(version, "1.0")
+
+    def test_api_token_initialization(self):
+        rest_api = vast_rest.RestApi(
+            "host",
+            "",
+            "",
+            "xxxxxxxxx",
+            True,
+            "1.0",
+        )
+        self.assertEqual(
+            rest_api.session.headers["authorization"],
+            "Api-Token xxxxxxxxx",
+        )
