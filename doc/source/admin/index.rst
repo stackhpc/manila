@@ -108,6 +108,7 @@ each back end.
    purestorage_flashblade_driver
    tegile_driver
    nexentastor5_driver
+   weka_share_driver
    ../configuration/shared-file-systems/drivers/windows-smb-driver
    zadara_driver
    ../configuration/shared-file-systems/drivers/vastdata_driver
