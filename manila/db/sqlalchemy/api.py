@@ -6607,10 +6607,16 @@ def _availability_zone_create_if_not_exist(context, name):
     try:
         return _availability_zone_get(context, name)
     except exception.AvailabilityZoneNotFound:
-        az = models.AvailabilityZone()
-        az.update({'id': uuidutils.generate_uuid(), 'name': name})
-        az.save(context.session)
-    return az
+        try:
+            nested = context.session.begin_nested()
+            az = models.AvailabilityZone()
+            az.update({'id': uuidutils.generate_uuid(), 'name': name})
+            az.save(context.session)
+            nested.commit()
+            return az
+        except db_exception.DBDuplicateEntry:
+            nested.rollback()
+            return _availability_zone_get(context, name)
 
 
 @require_context
@@ -8009,6 +8015,8 @@ def resource_lock_get_all(context, filters=None, limit=None, offset=None,
     all_projects = filters.get('all_projects') or filters.get('all_tenants')
     if project_id is None and not all_projects:
         filters['project_id'] = context.project_id
+    if project_id is not None:
+        authorize_project_context(context, project_id)
 
     legal_filter_keys = ('id', 'user_id', 'resource_id', 'resource_type',
                          'lock_context', 'resource_action', 'created_since',
