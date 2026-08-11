@@ -22,8 +22,6 @@
             voting: false
         - manila-tempest-plugin-lvm-fips:
             voting: false
-        - manila-grenade
-        - manila-grenade-skip-level-always
         - manila-rally-no-ss:
             voting: false
         - manila-rally-ss:
